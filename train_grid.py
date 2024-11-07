@@ -1,5 +1,5 @@
 import numpy as np
-from envs.gridworld import GridWorldEnv
+from envs.multiagent_gridworld import MultiAgentGridWorldEnv
 from envs.vectorized import vectorized
 import argparse
 import agents
@@ -24,7 +24,8 @@ def rollout_emp(key: jax.random.PRNGKey, policy: agents.Base, s: jnp.array, env)
 
         key, rng = jax.random.split(key)
 
-        s, done, h_ac = env.step_human(s, rng)
+        # TODO: done is now not just one boolean, but it should be [bool] with length num_humans
+        s, done, human_actions = env.step_humans(s, rng) # Assume that all the humans take their steps concurrently
         env.set_state(s)
 
         s, r, done, _ = env.step(r_ac)
@@ -32,13 +33,14 @@ def rollout_emp(key: jax.random.PRNGKey, policy: agents.Base, s: jnp.array, env)
 
         reward += r
 
-        return (s, reward, key, policy, env), (r_ac, h_ac, obs, info)
+        return (s, reward, key, policy, env), (r_ac, human_actions, obs, info)
 
     (_, reward, _, _, _), aux = jax.lax.scan(
         step_fn, (s, reward, key, policy, env), None, length=args.max_steps
     )
 
-    acs_r, acs_h, trajs, infos = jax.tree_map(lambda x: jnp.moveaxis(x, 1, 0), aux)
+    # TODO: have to rewrite this map for multiple people!
+    acs_r, acs_h, trajs, infos = jax.tree_map(lambda x: jnp.moveaxis(x, 1, 0), aux) # Get the human trajectories from each step
 
     info = jax.tree_map(lambda x: x[0].mean(), infos)
 
@@ -86,13 +88,14 @@ def train(key, policy, env, itr):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Gridworld for Empowerment")
+    parser = argparse.ArgumentParser(description="Multi-Agent Gridworld for Training/Testing Empowerment")
     parser.add_argument(
         "--goal_num",
         type=str,
         default="all",
         help="Goal type: 'all' for all coordinates can be goals, 'limited' for goal set that does not contain actual goal",
     )
+    parser.add_argument("--human_strategies", type=list(str), default=["NOISY_GREEDY", "RANDOM"], help="List of human strategies")
     parser.add_argument("--include_goal", action="store_true", help="Include human goal in goal set")
     parser.add_argument("--block_goal", action="store_true", help="Blocks can be on goal")
     parser.add_argument("--grid_size", type=int, default=5, help="Size of grid")
@@ -102,7 +105,9 @@ if __name__ == "__main__":
         default="corner",
         help="Test Case -- 'center' for human in center, 'corner' for human in corner, 'corner_hard' for untrapped human in corner, default is random",
     )
-    parser.add_argument("--num_boxes", type=int, default=2, help="Number of boxes in scene")
+    parser.add_argument("--num_humans", type=int, default=2, help="Number of humans in scene")
+    parser.add_argument("--num_boxes", type=int, default=4, help="Number of boxes in scene")
+    parser.add_argument("--num_goals", type=int, default=2, help="Number of goals in scene")
     parser.add_argument("--seed", type=int, default=0, help="Seed for random number generator")
     parser.add_argument("--random", action="store_true", help="Use random baseline")
     parser.add_argument("--epochs", type=int, default=10000, help="Number of epochs")
@@ -153,17 +158,22 @@ if __name__ == "__main__":
     if args.name is not None:
         wandbid = args.name + "-" + wandbid
 
+    assert len(args.human_strategies) == len(args.num_humans)
+
     key, rng = jax.random.split(key)
-    Env = vectorized(GridWorldEnv, args.num_envs)
+    Env = vectorized(MultiAgentGridWorldEnv, args.num_envs)
     env = Env(
-        jnp.zeros(2),
-        jnp.zeros(2 * args.num_boxes),
-        jnp.zeros(2),
-        args.test_case,
-        args.num_boxes,
-        args.block_goal,
-        args.grid_size,
-        1 - args.noise,
+        human_pos=jnp.zeros(2 * args.num_humans),
+        boxes_pos=jnp.zeros(2 * args.num_boxes),
+        human_goals=jnp.zeros(2 * args.num_goals),
+        human_strategies=args.human_strategies,
+        test_case=args.test_case,
+        num_boxes=args.num_boxes,
+        num_humans=args.num_humans,
+        num_goals=args.num_goals,
+        block_goal=args.block_goal,
+        grid_size=args.grid_size,
+        p=1 - args.noise,
     )
     key, rng = jax.random.split(key)
     
@@ -175,7 +185,7 @@ if __name__ == "__main__":
     if args.random:
         policy = agents.RandomEmpowermentPolicy(rng, env.state_dim, env.nA)
         config["method"] = "random"
-        wandb.init(project="empowerment", config=config, id="random-" + wandbid)
+        wandb.init(project="multi_empowerment", config=config, id="random-" + wandbid)
     elif args.ave:
         policy = agents.AVEPolicy(
             rng,
@@ -205,7 +215,7 @@ if __name__ == "__main__":
             smart_features=args.smart_features,
         )
         config["method"] = "ave"
-        wandb.init(project="empowerment", config=config, id="ave-" + wandbid)
+        wandb.init(project="multi_empowerment", config=config, id="ave-" + wandbid)
     else:
         policy = agents.ContrastiveEmpowermentPolicy(
             rng,
@@ -235,6 +245,6 @@ if __name__ == "__main__":
             repr_buffer_size=args.repr_buffer_size,
         )
         config["method"] = "contrastive"
-        wandb.init(project="empowerment", config=config, id="contrastive-" + wandbid)
+        wandb.init(project="multi_empowerment", config=config, id="contrastive-" + wandbid)
 
     train(key, policy, env, args.epochs)

@@ -1,7 +1,7 @@
 name: esr
 channels:
   - conda-forge
-  - nvidia
+#  - nvidia
 dependencies:
   - scipy=1.10.1
   - pip=24.0
@@ -12,12 +12,13 @@ dependencies:
   - wandb=0.16.5
   - imageio=2.34.0
   - pygame=2.5.2
-  - cudnn
-  - cudatoolkit
-  - cuda-nvcc
+  # - cudnn
+  # - cudatoolkit
+  # - cuda-nvcc
   - pip:
-    - jax==0.4.28
-    - jaxlib==0.4.28+cuda12.cudnn89
+    - jax-metal==0.1.0
+  #  - jax==0.4.28
+  #  - jaxlib==0.4.28+cuda12.cudnn89
     - simple-pytree==0.2.2
     - imageio==2.34.0
     - moviepy==1.0.3
@@ -25,5 +26,6 @@ dependencies:
     - gym==0.26.2
     - gymnax==0.0.8
     - jaxmarl==0.0.2
+    - click==8.1.7
     - tensorflow-probability==0.24.0
-    - -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+  #  - -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html

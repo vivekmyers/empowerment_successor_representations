@@ -1,18 +1,9 @@
-# Empowerment via Succesor Representations
+## Getting Started
 
-Empowerment for surprise minimization in gridworld and overcooked environments.
+1. Install required packages, use `conda env create`
+2. Activate the env via `conda activate esr`
 
+## Training
 
-## Installation 
-
-To install required packages, use `conda env create`
-
-
-## Contrastive Empowerment
-
-To train the learned contrastive empowerment agent, activate the virtual environment using `conda activate empgrid`, and run `train.py` with the desired arguments:
-
-```
-python train.py --num_boxes 0 --seed 0
-```
+```python train_grid.py --num_boxes 4 --seed 0```
 
