@@ -7,6 +7,7 @@ import buffers
 from agents.base import Base
 from simple_pytree import Pytree, static_field
 
+# TODO: update this to only empower the first agent (index zero)
 
 class ContrastiveEmpowermentPolicy(Pytree, Base, mutable=True):
 

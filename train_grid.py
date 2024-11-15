@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import wandb
 import networks.gridworld
-import version
+import json
 
 @jax.jit
 def rollout_emp(key: jax.random.PRNGKey, policy: agents.Base, s: jnp.array, env):
@@ -24,11 +24,11 @@ def rollout_emp(key: jax.random.PRNGKey, policy: agents.Base, s: jnp.array, env)
 
         key, rng = jax.random.split(key)
 
-        # TODO: done is now not just one boolean, but it should be [bool] with length num_humans
-        s, done, human_actions = env.step_humans(s, rng) # Assume that all the humans take their steps concurrently
+        s, done_list, human_actions = env.step_humans(s, rng) # Assume that all the humans take their steps concurrently.
+        # instead of s, now it's human_states_list
         env.set_state(s)
 
-        s, r, done, _ = env.step(r_ac)
+        s, r, done_list, _ = env.step(r_ac)
         env.set_state(s)
 
         reward += r
@@ -95,7 +95,7 @@ if __name__ == "__main__":
         default="all",
         help="Goal type: 'all' for all coordinates can be goals, 'limited' for goal set that does not contain actual goal",
     )
-    parser.add_argument("--human_strategies", type=list(str), default=["NOISY_GREEDY", "RANDOM"], help="List of human strategies")
+    parser.add_argument("--human_strategies", nargs="+", default=["NOISY_GREEDY", "RANDOM"], help="List of human strategies")
     parser.add_argument("--include_goal", action="store_true", help="Include human goal in goal set")
     parser.add_argument("--block_goal", action="store_true", help="Blocks can be on goal")
     parser.add_argument("--grid_size", type=int, default=5, help="Size of grid")
@@ -150,15 +150,19 @@ if __name__ == "__main__":
     parser.add_argument("--smart_features", action="store_true", help="Use smart features for AVE baseline")
     parser.add_argument('--max_steps', type=int, default=50, help='Maximum number of steps in an episode')
     parser.add_argument('--render_freq', type=int, default=20, help='Frequency of rendering')
-    args = parser.parse_args()
-    key = jax.random.PRNGKey(args.seed)
 
+    args = parser.parse_args()
+
+    with open('commandline_args.txt', 'w') as f:
+        json.dump(args.__dict__, f, indent=2)
+
+    key = jax.random.PRNGKey(args.seed)
     wandbid = wandb.util.generate_id(4)
 
     if args.name is not None:
         wandbid = args.name + "-" + wandbid
 
-    assert len(args.human_strategies) == len(args.num_humans)
+    assert len(args.human_strategies) == args.num_humans
 
     key, rng = jax.random.split(key)
     Env = vectorized(MultiAgentGridWorldEnv, args.num_envs)
@@ -173,14 +177,12 @@ if __name__ == "__main__":
         num_goals=args.num_goals,
         block_goal=args.block_goal,
         grid_size=args.grid_size,
-        p=1 - args.noise,
     )
     key, rng = jax.random.split(key)
     
     config = vars(args)
 
     config["env_name"] = "gridworld"
-    config["version"] = version.__version__
 
     if args.random:
         policy = agents.RandomEmpowermentPolicy(rng, env.state_dim, env.nA)

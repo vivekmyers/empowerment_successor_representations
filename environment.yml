@@ -1,4 +1,4 @@
-name: esr
+name: multi_empowerment
 channels:
   - conda-forge
 #  - nvidia
@@ -17,8 +17,9 @@ dependencies:
   # - cuda-nvcc
   - pip:
     - jax-metal==0.1.0
-  #  - jax==0.4.28
+    - jax==0.4.28
   #  - jaxlib==0.4.28+cuda12.cudnn89
+    - jaxlib==0.4.28
     - simple-pytree==0.2.2
     - imageio==2.34.0
     - moviepy==1.0.3

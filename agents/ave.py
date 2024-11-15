@@ -8,6 +8,7 @@ from agents.base import Base
 from simple_pytree import static_field
 from simple_pytree import Pytree
 
+# TODO: update this to empower only the first agent (index zero)
 
 class AVEPolicy(Pytree, Base, mutable=True):
 

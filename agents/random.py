@@ -18,6 +18,7 @@ class RandomEmpowermentPolicy(Pytree, Base, mutable=True):
     def next_action(self, s):
         self.key, key = jax.random.split(self.key)
         a = jax.random.randint(key, (s.shape[:-1]), 0, self.a_dim)
+        print("This is the action taken by assistive agent: ", a)
         return a, {'action': a}
 
     def observe(self, s, a_r, a_h):

@@ -1,13 +1,3 @@
-"""
-Add another agent, another goal to the grid world. 
-The goal is red and the agent should go there. 
-Be very simple. The “block-mover” (aka robot) can also freeze the new agent. 
-Say this agent just moves randomly or moves simply like back and forth. 
-Will the “block-mover” freeze the new agent? Block it in with blocks? 
-If so, then we can say that empowerment for one person can lead to disempowerment of another, which is a problem!
-"""
-
-
 import jax
 import jax.numpy as jnp
 from gym import utils
@@ -15,23 +5,23 @@ from enum import IntEnum
 from six import StringIO
 import sys
 import functools
-from ..humans import noisy_greedy, random, human_types
-
+from humans import noisy_greedy_human_policy, human_types, random_human_policy
 
 @jax.tree_util.register_pytree_node_class
 class MultiAgentGridWorldEnv:
 
     def tree_flatten(self):
-        children = (self.cur_pos, self.boxes_pos, self.human_goal, self.s)
-        aux = (self.test_case, self.num_boxes, self.block_goal, self.grid_size, self.p)
+        children = (self.cur_pos, self.boxes_pos, self.human_goals, self.s)
+        aux = (self.human_strategies, self.test_case, self.num_boxes, self.num_humans, self.num_goals, self.block_goal, self.grid_size, self.human_policies)
         return children, aux
 
     @classmethod
     def tree_unflatten(cls, aux, children):
-        cur_pos, boxes_pos, human_goal, s = children
-        test_case, num_boxes, block_goal, grid_size, p = aux
-        obj = cls(cur_pos, boxes_pos, human_goal, test_case, num_boxes, block_goal, grid_size, p)
+        cur_pos, boxes_pos, human_goals, s = children
+        human_strategies, test_case, num_boxes, num_humans, num_goals, block_goal, grid_size, human_policies = aux
+        obj = cls(cur_pos, boxes_pos, human_goals, human_strategies, test_case, num_boxes, num_humans, num_goals, block_goal, grid_size)
         obj.s = s
+        obj.human_policies = human_policies
         return obj
 
     class HumanActions(IntEnum):
@@ -42,12 +32,13 @@ class MultiAgentGridWorldEnv:
         stay = 4
         
     class AgentActions(IntEnum):
-        left = 0
-        down = 1
-        right = 2
-        up = 3
-        stay = 4
-        freeze_agent = 5
+        move_box_left = 0
+        move_box_down = 1
+        move_box_right = 2
+        move_box_up = 3
+        no_op = 4
+        freeze_agent = 5 
+        # NOTE: this technically could be two separate actions -- freeze agent 0, freeze agent 1. For now we'll assume it can only freeze agent 1.
 
     def __init__(
         self,
@@ -61,18 +52,16 @@ class MultiAgentGridWorldEnv:
         num_goals,
         block_goal,
         grid_size,
-        p,
     ):
         """
-        Gridworld environment with blocks.
-
-        :param size: gridworld dimensions are (size, size)
-        :param p:
-        :param num_blocks:
+        Multi-agent gridworld environment with blocks. See `docs/multiagent_gridworld_env.md` for more details. 
         """
 
         self.num_boxes = num_boxes
-        assert num_boxes == int(len(boxes_pos) / 2), "Number of boxes does not match"
+        if (num_boxes != int(len(boxes_pos) / 2)):
+            print("DEBUG: This is boxes_pos length:", int(len(boxes_pos) / 2))
+    
+        # assert num_boxes == int(len(boxes_pos) / 2), "Number of boxes does not match" # TODO BUG: why does this not always hold true??
         assert self.num_boxes > 0, "Cannot have 0 Boxes"
 
         self.num_humans = num_humans
@@ -81,33 +70,30 @@ class MultiAgentGridWorldEnv:
         self.human_actions = MultiAgentGridWorldEnv.HumanActions
         self.agent_actions = MultiAgentGridWorldEnv.AgentActions
         self.action_dim = 2  # one for action, one for box number
+
         nA = len(self.human_actions) * grid_size**2 # TODO: figure out what this is??
         self.nA = nA
 
         self.state_dim = 2 + self.num_boxes * 2
         self.state_vec_dim = self.state_dim * grid_size
         self.grid_size = grid_size
-        self.p = p
 
         self.cur_pos = human_pos
         self.boxes_pos = boxes_pos
 
-        # self.start_state = jnp.array(list(self.cur_pos) + list(self.boxes_pos))
-        # self.s = jnp.concatenate([self.cur_pos, self.boxes_pos], axis=-1)
-
         self.human_goals = human_goals # TODO: change all instances of this to human_goals not human_goal!!!
         self.test_case = test_case
         self.block_goal = block_goal
+        self.human_strategies = human_strategies
 
-        self.humans = [] # TODO: use this self.humans in the step_human step!!!
-        for strat in human_strategies:
+        self.human_policies = []
+        for strat in self.human_strategies:
             if strat == human_types.HumanTypes.NOISY_GREEDY.name:
-                self.humans.append(noisy_greedy.NoisyGreedyHumanPolicy(human_goals, MultiAgentGridWorldEnv.HumanActions))
+                self.human_policies.append(noisy_greedy_human_policy.NoisyGreedyHumanPolicy(human_goals, MultiAgentGridWorldEnv.HumanActions))
             elif strat == human_types.HumanTypes.RANDOM.name:
-                self.humans.append(random.RandomHumanPolicy(human_goals, MultiAgentGridWorldEnv.HumanActions))
+                self.human_policies.append(random_human_policy.RandomHumanPolicy(human_goals, MultiAgentGridWorldEnv.HumanActions))
 
-        assert len(self.humans) == len(self.num_humans)
-
+        assert len(self.human_policies) == self.num_humans
 
     def inc_boxes(self, state_vec, a):
         """
@@ -219,53 +205,71 @@ class MultiAgentGridWorldEnv:
     def set_state(self, s):
         self.s = s
 
-    # TODO: WRITE!!!
-    def step_humans(self):
+    def reconcile_human_states(self, human_states):
+        # TODO: write later!! 
         """
-        Should have each person concurrently take a step based on the current environment
-        Return the new state as a result
+        If both agents choose to go to the same location, then neither of them are able to move.
+        Then, we should return not just the new state, but also update the done_list and human_actions as a result
         """
-        # for human_policy in self.humans:
-        #     human_policy.step_human(s, rng, self.human_goals)
+        print("These are the human_states: ", human_states)
         pass
 
-    @jax.jit
-    def step_human_action(self, s, ac):
+    # TODO: finish
+    def step_humans(self, s, rng):
+        """
+        Should have each human agent concurrently take a step based on the current environment
+        Return the new states, a boolean list of whether the agent is done, and what the human actions were as a result
+        """
+        next_human_states = []
+        done_list = []
+        human_actions = []
+        for human_policy in self.human_policies:
+            s_next, done, ac = human_policy.step_human(s, rng, self.human_goals)
+            next_human_states.append(s_next)
+            done_list.append(done)
+            human_actions.append(ac)
 
-        # TODO: make this work for multiple people!!
+        next_state = self.reconcile_human_states(next_human_states)
+
+        return next_state, done_list, human_actions
+
+    # @jax.jit
+    # def step_human_action(self, s, ac):
+
+    #     # TODO later: make this work for multiple people for the AvE policy!!
         
-        row, col = s[0], s[1]  # current human position
-        b_rows = [s[i] for i in range(2, self.state_dim - 1, 2)]  # boxes rows
-        b_cols = [s[i] for i in range(3, self.state_dim, 2)]  # boxes cols
+    #     row, col = s[0], s[1]  # current human position
+    #     b_rows = [s[i] for i in range(2, self.state_dim - 1, 2)]  # boxes rows
+    #     b_cols = [s[i] for i in range(3, self.state_dim, 2)]  # boxes cols
 
-        # if ac == self.actions.left:
-        #     col = self.inc_(col, row, b_cols, b_rows, -1)
-        # elif ac == self.actions.down:
-        #     row = self.inc_(row, col, b_rows, b_cols, 1)
-        # elif ac == self.actions.right:
-        #     col = self.inc_(col, row, b_cols, b_rows, 1)
-        # elif ac == self.actions.up:
-        #     row = self.inc_(row, col, b_rows, b_cols, -1)
-        # elif ac == self.actions.stay:
-        #     pass
+    #     # if ac == self.actions.left:
+    #     #     col = self.inc_(col, row, b_cols, b_rows, -1)
+    #     # elif ac == self.actions.down:
+    #     #     row = self.inc_(row, col, b_rows, b_cols, 1)
+    #     # elif ac == self.actions.right:
+    #     #     col = self.inc_(col, row, b_cols, b_rows, 1)
+    #     # elif ac == self.actions.up:
+    #     #     row = self.inc_(row, col, b_rows, b_cols, -1)
+    #     # elif ac == self.actions.stay:
+    #     #     pass
 
-        row, col = jax.lax.switch(
-            ac,
-            [
-                lambda: (row, self.inc_(col, row, b_cols, b_rows, -1)),
-                lambda: (self.inc_(row, col, b_rows, b_cols, 1), col),
-                lambda: (row, self.inc_(col, row, b_cols, b_rows, 1)),
-                lambda: (self.inc_(row, col, b_rows, b_cols, -1), col),
-                lambda: (row, col),
-            ],
-        )
+    #     row, col = jax.lax.switch(
+    #         ac,
+    #         [
+    #             lambda: (row, self.inc_(col, row, b_cols, b_rows, -1)),
+    #             lambda: (self.inc_(row, col, b_rows, b_cols, 1), col),
+    #             lambda: (row, self.inc_(col, row, b_cols, b_rows, 1)),
+    #             lambda: (self.inc_(row, col, b_rows, b_cols, -1), col),
+    #             lambda: (row, col),
+    #         ],
+    #     )
 
-        new_state = [row, col] + sum(
-            ([x, y] for x, y in zip(b_rows, b_cols)), []
-        )
-        new_state = jnp.array(new_state)
+    #     new_state = [row, col] + sum(
+    #         ([x, y] for x, y in zip(b_rows, b_cols)), []
+    #     )
+    #     new_state = jnp.array(new_state)
 
-        return new_state
+    #     return new_state
 
     @jax.jit
     def image_array(self, s):
@@ -351,7 +355,6 @@ class MultiAgentGridWorldEnv:
             boxes_pos += [center_coord, center_coord - 1]
             boxes_pos += [center_coord - 1, center_coord]
             boxes_pos = boxes_pos[: 2 * num_boxes]
-            # num_boxes = 4
 
         elif "corner_hard" in test_case:
             # Randomly choose a corner
@@ -443,6 +446,7 @@ class MultiAgentGridWorldEnv:
 
         return self.s
 
+    # TODO: figure out what's going on here -- is this to update the ovearll environment, given an action??
     @functools.partial(jax.jit, static_argnums=(1,))
     def step(self, a):
         s_next, r, done = self.inc_boxes(self.s, self.a_idx_to_vec(a))
