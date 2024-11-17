@@ -26,9 +26,13 @@ def rollout_emp(key: jax.random.PRNGKey, policy: agents.Base, s: jnp.array, env)
 
         s, done_list, human_actions = env.step_humans(s, rng) # Assume that all the humans take their steps concurrently.
         # instead of s, now it's human_states_list
+
+        # TODO: change to set states of multiple humans
         env.set_state(s)
 
         s, r, done_list, _ = env.step(r_ac)
+
+        # TODO: change to set states of multiple humans
         env.set_state(s)
 
         reward += r
@@ -102,8 +106,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test_case",
         type=str,
-        default="corner",
-        help="Test Case -- 'center' for human in center, 'corner' for human in corner, 'corner_hard' for untrapped human in corner, default is random",
+        default="random",
+        help="Determines the initialization of gridworld. 'random' is default and only one implemented. In original gridworld, also had 'center' for human in center, 'corner' for human in corner, 'corner_hard' for untrapped human in corner.",
     )
     parser.add_argument("--num_humans", type=int, default=2, help="Number of humans in scene")
     parser.add_argument("--num_boxes", type=int, default=4, help="Number of boxes in scene")
@@ -167,9 +171,9 @@ if __name__ == "__main__":
     key, rng = jax.random.split(key)
     Env = vectorized(MultiAgentGridWorldEnv, args.num_envs)
     env = Env(
-        human_pos=jnp.zeros(2 * args.num_humans),
+        humans_pos=jnp.zeros(2 * args.num_humans),
         boxes_pos=jnp.zeros(2 * args.num_boxes),
-        human_goals=jnp.zeros(2 * args.num_goals),
+        goals_pos=jnp.zeros(2 * args.num_goals),
         human_strategies=args.human_strategies,
         test_case=args.test_case,
         num_boxes=args.num_boxes,

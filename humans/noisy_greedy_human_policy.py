@@ -4,13 +4,16 @@ from enum import IntEnum
 import json
 
 class NoisyGreedyHumanPolicy():
+    """
+    Note that this human policy only works on the multiagent gridworld env
+    """
 
     def __init__(
         self,
-        goals: list,
+        goals_pos: list,
         actions: IntEnum
     ):
-        self.goals = goals
+        self.goals_pos = goals_pos
         self.actions = actions
 
         with open('commandline_args.txt', 'r') as f:
@@ -18,20 +21,17 @@ class NoisyGreedyHumanPolicy():
         
         self.p = 1 - args_dict.get("noise")
 
-    # TODO later: figure out how to configure these steps for different environments. 
-    # Currently, this is only for the grid env, not for Overcooked.
-
     @jax.jit
-    def step_human(self, s, rng, human_goals: list=[]):
-        if len(human_goals) == 0:
-            human_goals = self.goals
+    def step_human(self, s, rng, goals_pos: list=[]):
+        if len(goals_pos) == 0:
+            goals_pos = self.goals_pos
 
-        s_next, done, ac = self._step_human(s, human_goals, rng)
+        s_next, done, ac = self._step_human(s, goals_pos, rng)
         # assert self.valid(s_next), "Cannot move into a box"
         return s_next, done, ac
 
     @jax.jit
-    def _step_human(self, s, human_goals, rng):
+    def _step_human(self, s, goals_pos, rng):
         """
         Tries out each potential action to see which one takes the human closest to goal. 
         The human chooses this action, with some random noise 
@@ -39,8 +39,8 @@ class NoisyGreedyHumanPolicy():
         dists_list = []
         rows_list = []
         cols_list = []
-        for idx in range(0, len(human_goals)):
-            human_goal = human_goals[idx]
+        for idx in range(0, len(goals_pos)):
+            human_goal = goals_pos[idx]
             dists = []
             rows = []
             cols = []
@@ -55,7 +55,7 @@ class NoisyGreedyHumanPolicy():
 
             # NOTE: this basically brute force tries out each action to see which one brings it the closest
 
-            for ac in range(5):
+            for ac in range(len(self.actions)):
                 row = row0
                 col = col0
 
