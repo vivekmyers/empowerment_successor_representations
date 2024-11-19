@@ -3,19 +3,34 @@ import jax
 import jax.numpy as jnp
 import random
 
+@jax.tree_util.register_pytree_node_class
 class RandomHumanPolicy():
     """
-    Note that this human policy only works on the multiagent gridworld env
+    Note: this human policy only works on the multiagent gridworld env
     """
 
     def __init__(
         self,
         goals_pos: list,
-        actions: IntEnum
+        actions: IntEnum,
+        state_dim: int
     ):
         self.goals_pos = goals_pos
         self.actions = actions
+        self.state_dim = state_dim
         jax.random.key(0)
+
+    def tree_flatten(self):
+        children = ()
+        aux = (self.goals_pos, self.actions, self.state_dim)
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        goals_pos, actions, state_dim = aux
+        obj = cls(goals_pos, actions, state_dim)
+        return obj
+
 
     @jax.jit
     def step_human(self, s, rng, goals_pos: list=[]):

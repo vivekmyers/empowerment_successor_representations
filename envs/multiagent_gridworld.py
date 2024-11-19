@@ -11,14 +11,14 @@ from humans import noisy_greedy_human_policy, human_types, random_human_policy
 class MultiAgentGridWorldEnv:
 
     def tree_flatten(self):
-        children = (self.humans_pos, self.boxes_pos, self.goals_pos, self.concat_human_box_states)
-        aux = (self.human_strategies, self.test_case, self.num_boxes, self.num_humans, self.num_goals, self.block_goal, self.grid_size, self.human_policies)
+        children = (self.humans_pos, self.boxes_pos, self.goals_pos, self.concat_human_box_states, self.human_policies)
+        aux = (self.human_strategies, self.test_case, self.num_boxes, self.num_humans, self.num_goals, self.block_goal, self.grid_size)
         return children, aux
 
     @classmethod
     def tree_unflatten(cls, aux, children):
-        humans_pos, boxes_pos, goals_pos, concat_human_box_states = children
-        human_strategies, test_case, num_boxes, num_humans, num_goals, block_goal, grid_size, human_policies = aux
+        humans_pos, boxes_pos, goals_pos, concat_human_box_states, human_policies = children
+        human_strategies, test_case, num_boxes, num_humans, num_goals, block_goal, grid_size = aux
         obj = cls(humans_pos, boxes_pos, goals_pos, human_strategies, test_case, num_boxes, num_humans, num_goals, block_goal, grid_size)
         obj.concat_human_box_states = concat_human_box_states
         obj.human_policies = human_policies
@@ -74,8 +74,7 @@ class MultiAgentGridWorldEnv:
         nA = len(self.human_actions) * grid_size**2 # TODO: figure out what this is??
         self.nA = nA
 
-        self.state_dim = 2 + self.num_boxes * 2
-        self.state_vec_dim = self.state_dim * grid_size
+        self.state_dim = self.num_boxes * 2 + self.num_humans * 2 # number of state variables in the environment (row, col)
         self.grid_size = grid_size
 
         self.humans_pos = humans_pos
@@ -89,9 +88,9 @@ class MultiAgentGridWorldEnv:
         self.human_policies = []
         for strat in self.human_strategies:
             if strat == human_types.HumanTypes.NOISY_GREEDY.name:
-                self.human_policies.append(noisy_greedy_human_policy.NoisyGreedyHumanPolicy(goals_pos, MultiAgentGridWorldEnv.HumanActions))
+                self.human_policies.append(noisy_greedy_human_policy.NoisyGreedyHumanPolicy(goals_pos, MultiAgentGridWorldEnv.HumanActions, self.state_dim))
             elif strat == human_types.HumanTypes.RANDOM.name:
-                self.human_policies.append(random_human_policy.RandomHumanPolicy(goals_pos, MultiAgentGridWorldEnv.HumanActions))
+                self.human_policies.append(random_human_policy.RandomHumanPolicy(goals_pos, MultiAgentGridWorldEnv.HumanActions, self.state_dim))
 
         assert len(self.human_policies) == self.num_humans
 
@@ -151,29 +150,39 @@ class MultiAgentGridWorldEnv:
 
     def inc_boxes(self, state_vecs, a):
         """
-        Moves the box positions??
+        Moves the box positions, based on the agent's move and updates the next state, rewards, done_list
         """
         boxnum, ac = a[1], a[0]
         return self._inc_boxes(state_vecs, boxnum, ac, self.goals_pos)
 
 
+    # TODO: ALSO TAKE INTO ACCOUNT THE FACT THAT AGENT MAY HAVE TRIED TO MOVE, BUT THEY MAY GET FROZEN
     def _inc_boxes(self, state_vec, boxnum, ac, goals_pos):
         """
         Private function to move the boxes' positions, based on action of assistive agent
         """
-        print("This is the state_vec in _inc_boxes: ", state_vec)
-        row, col = state_vec[0], state_vec[1] # Current position of agent 
-        # TODO: change to include multiple agents!!!
+        human_rows = jnp.array([state_vec[i] for i in range(0, self.num_humans * 2 - 1, 2)])
+        human_cols = jnp.array([state_vec[i] for i in range(1, self.num_humans * 2, 2)])
 
-        b_rows = jnp.array([state_vec[i] for i in range(2, self.state_dim - 1, 2)]) #2, 4, 6, 8
-        b_cols = jnp.array([state_vec[i] for i in range(3, self.state_dim, 2)]) #3, 5, 7
+        b_rows = jnp.array([state_vec[i] for i in range(self.num_humans * 2, self.state_dim - 1, 2)]) #4, 6, 8
+        b_cols = jnp.array([state_vec[i] for i in range(self.num_humans * 2 + 1, self.state_dim, 2)]) # 5, 7, 9
   
-        for goal_pos in goals_pos:
-            at_goal = jnp.array_equal([row, col], goal_pos)
-            already_done = (
-                jnp.any(jnp.logical_and(jnp.array(b_rows) == row, jnp.array(b_cols) == col))
-                | at_goal
-            )
+        # Check whether humans are already at any of the goals, or whether the box is trying to move into any of the humans' spaces
+        humans_at_goals = [[] for i in range(0, len(human_rows))] # num_humans x num_boxes
+        already_dones = [[] for i in range(0, len(human_rows))] # num_humans x num_boxes
+
+        for i in range(0, len(human_rows)):
+            for goal_pos in goals_pos:
+                at_goal = jnp.array_equal([human_rows[i], human_cols[i]], goal_pos)
+                humans_at_goals[i].append(at_goal)
+                already_done = (
+                    jnp.any(jnp.logical_and(jnp.array(b_rows) == human_rows[i], jnp.array(b_cols) == human_cols[i]))
+                    | at_goal
+                )
+                already_dones[i].append(already_done)
+
+        humans_at_goals = jnp.array(humans_at_goals)
+        already_dones = jnp.array(already_dones)
 
         b_col = boxnum % self.grid_size
         b_row = boxnum // self.grid_size
@@ -183,68 +192,78 @@ class MultiAgentGridWorldEnv:
 
         box_mask = jnp.all(allpos == boxpos, axis=-1)
         box = jnp.argmax(box_mask)
-        nop = jnp.all(~box_mask) | already_done
+        nop = jnp.all(~box_mask) | already_dones # Find out whether box was not found, or whether action is redundant/unnecessary
+        # nop now is a 2D array of booleans
+        # num_humans x num_boxes
 
+        # Update box position, based on the agent's attempted action
         other_cols = b_cols.at[box].set(-1)
         other_rows = b_rows.at[box].set(-1)
 
-        # if ac == self.actions.left:
-        #     b_col = self.inc_(b_col, b_row, other_cols, other_rows, -1)
-        # elif ac == self.actions.down:
-        #     b_row = self.inc_(b_row, b_col, other_rows, other_cols, 1)
-        # elif ac == self.actions.right:
-        #     b_col = self.inc_(b_col, b_row, other_cols, other_rows, 1)
-        # elif ac == self.actions.up:
-        #     b_row = self.inc_(b_row, b_col, other_rows, other_cols, -1)
-        # elif ac == self.actions.stay:
-        #     pass
         vals = [
-            lambda: (b_row, self.inc_(b_col, b_row, other_cols, other_rows, -1)),
-            lambda: (self.inc_(b_row, b_col, other_rows, other_cols, 1), b_col),
-            lambda: (b_row, self.inc_(b_col, b_row, other_cols, other_rows, 1)),
-            lambda: (self.inc_(b_row, b_col, other_rows, other_cols, -1), b_col),
-            lambda: (b_row, b_col),
+            lambda: (b_row, self.inc_(b_col, b_row, other_cols, other_rows, -1)), # Left
+            lambda: (self.inc_(b_row, b_col, other_rows, other_cols, 1), b_col), # Down
+            lambda: (b_row, self.inc_(b_col, b_row, other_cols, other_rows, 1)), # Right
+            lambda: (self.inc_(b_row, b_col, other_rows, other_cols, -1), b_col), # Up
+            lambda: (b_row, b_col), # Stay
         ]
         b_row, b_col = jax.lax.switch(ac, vals)
-
 
         b_cols = b_cols.at[box].set(b_col)
         b_rows = b_rows.at[box].set(b_row)
 
-        dead = jnp.any(jnp.logical_and(b_rows == row, b_cols == col)) # Do any boxes end up in the agents position
+        # Check whether any boxes end up in the agents position
+        dead = jnp.any(jnp.logical_and(
+        b_rows[:, None] == human_rows,  # Compare all box rows with all human rows
+        b_cols[:, None] == human_cols   # Compare all box cols with all human cols
+        ))
+        # num_boxes x num_humans matrix. 
+        # If position (3,0) is true, that means that box at index three and human idx 0 are at same spot
 
         stacked = jnp.array([b_rows, b_cols]).T.flatten()
-        new_state = jnp.concatenate([jnp.array([row, col]), stacked])
+        new_state = jnp.concatenate([jnp.stack([human_rows, human_cols], axis=-1).flatten(), stacked]) 
+        # This becomes a 1D array with length num_human*2 + num_boxes * 2
         updated_state = new_state * (1 - nop) + jnp.array(state_vec) * nop
-        done = (dead * (1 - nop)) | already_done
-        r = at_goal
+        done = (dead.T * (1 - nop)) | already_dones # num_humans x num_boxes
+        print("this is done: ", done)
+        r = [item for sublist in humans_at_goals for item in sublist] # NOTE: this is a flattened list of lists, indexed by the human agent and goal
 
-        return updated_state, r, done # TODO: update to done list...
+        return updated_state, r, done
 
 
-    # TODO: change to add in extra agent maybe??
     def state_vec(self, s):
-        svec = jnp.zeros(self.state_vec_dim)
+        """
+        Converts a state s into a one-hot encoded vector representation of that state.
+        The positions corresponding to the state values are set to 1, while others remain 0.
+        Each human and each box has a one hot encoding of length grid_size * grid_size.
+        """
+        state_vec_dim = self.state_dim / 2 * (self.grid_size * self.grid_size)
+        svec = jnp.zeros(state_vec_dim)
         for i in range(self.state_dim):
-            svec[s[i] + i * self.grid_size] = 1
+            svec[s[i] + i * self.grid_size] = 1 # TODO: check this out...
         return svec
 
 
-    def inc_(self, pos_move, pos_other, other_pos_move, other_pos_other, delta):
+    def inc_(self, box_pos_1, box_pos_2, other_pos_1, other_pos_2, delta):
+        """
+        Moves a box along a grid (either horizontally or vertically) based on the given delta (change in position).
+        Ensures that the box doesn’t collide with other boxes or humans.
+        """
         target_block = (
-            False  # if target pos has a block or human, can't move block there)
+            False  # if target pos has another block or a human, can't move block there)
         )
         for i in range(self.num_boxes):
-            update = (pos_move + delta == other_pos_move[i]) & (
-                pos_other == other_pos_other[i]
+            update = (box_pos_1 + delta == other_pos_1[i]) & (
+                box_pos_2 == other_pos_2[i]
             )
             target_block = target_block | update
-        pos_move = (
-            jnp.minimum(jnp.maximum(pos_move + delta, 0), self.grid_size - 1)
+
+        box_pos_1 = (
+            jnp.minimum(jnp.maximum(box_pos_1 + delta, 0), self.grid_size - 1)
             * (1 - target_block)
-            + pos_move * target_block
+            + box_pos_1 * target_block
         )
-        return pos_move
+        return box_pos_1
 
 
 # TODO: I don't think that this transformation works well anymore with a fifth action?
@@ -267,20 +286,11 @@ class MultiAgentGridWorldEnv:
         print("This is concat human box states", s)
         self.concat_human_box_states = s
 
-    def reconcile_human_states(self, human_states):
-        # TODO: write!! 
-        """
-        If both agents choose to go to the same location, then neither of them are able to move.
-        Then, we should return not just the new state, but also update the done_list and human_actions as a result
-        """
-        print("These are the human_states: ", human_states)
-        pass
-
     # TODO: finish
     def step_humans(self, s, rng):
         """
-        Should have each human agent concurrently take a step based on the current environment
-        Return the new states, a boolean list of whether the agent is done, and what the human actions were as a result
+        Returns the new state of the environment, a boolean list of whether each agent is done, and the human actions.
+        Each human agent concurrently takes a step based on the current environment.
         """
         next_human_states = []
         done_list = []
@@ -291,9 +301,33 @@ class MultiAgentGridWorldEnv:
             done_list.append(done)
             human_actions.append(ac)
 
-        next_state = self.reconcile_human_states(next_human_states)
+        next_state = self._reconcile_human_states(next_human_states)
 
         return next_state, done_list, human_actions
+    
+    def _reconcile_human_states(self, human_states):
+        # TODO: write!! 
+        """
+        If both agents choose to go to the same location, then neither of them are able to move.
+        Then, we should return not just the new state, but also update the done_list and human_actions as a result
+        """
+        print("These are the human_states: ", human_states)
+        pass
+    
+    @functools.partial(jax.jit, static_argnums=(1,))
+    def step(self, a):
+        """
+        Returns the new state of the environment, given an agent action
+        """
+        s_next, r, done = self.inc_boxes(self.concat_human_box_states, self.a_idx_to_vec(a))
+        # assert self.valid(s_next) or done, "Cannot move into a box"
+        return s_next, r, done, {}
+
+    # def valid(self, s):
+    #     assert len(s) == self.state_dim
+    #     boxes_pos = [(s[i], s[i + 1]) for i in range(2, self.state_dim - 1, 2)]
+    #     row, col = s[0], s[1]
+    #     return not any(row == r and col == c for r, c in boxes_pos)
 
     # @jax.jit
     # def step_human_action(self, s, ac):
@@ -413,16 +447,3 @@ class MultiAgentGridWorldEnv:
 
         if filename is not None:
             outfile.close()
-
-    # TODO: figure out what's going on here -- is this to update the overall environment, given an action??
-    @functools.partial(jax.jit, static_argnums=(1,))
-    def step(self, a):
-        s_next, r, done = self.inc_boxes(self.concat_human_box_states, self.a_idx_to_vec(a))
-        # assert self.valid(s_next) or done, "Cannot move into a box"
-        return s_next, r, done, {}
-
-    def valid(self, s):
-        assert len(s) == self.state_dim
-        boxes_pos = [(s[i], s[i + 1]) for i in range(2, self.state_dim - 1, 2)]
-        row, col = s[0], s[1]
-        return not any(row == r and col == c for r, c in boxes_pos)

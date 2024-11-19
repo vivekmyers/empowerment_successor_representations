@@ -3,23 +3,38 @@ import jax.numpy as jnp
 from enum import IntEnum
 import json
 
+@jax.tree_util.register_pytree_node_class
 class NoisyGreedyHumanPolicy():
     """
-    Note that this human policy only works on the multiagent gridworld env
+    Note: this human policy only works on the multiagent gridworld env
     """
 
     def __init__(
         self,
         goals_pos: list,
-        actions: IntEnum
+        actions: IntEnum,
+        state_dim: int
     ):
         self.goals_pos = goals_pos
         self.actions = actions
+        self.state_dim = state_dim
 
         with open('commandline_args.txt', 'r') as f:
             args_dict = json.load(f)
         
         self.p = 1 - args_dict.get("noise")
+
+    def tree_flatten(self):
+        children = ()
+        aux = (self.goals_pos, self.actions, self.state_dim)
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        goals_pos, actions, state_dim = aux
+        obj = cls(goals_pos, actions, state_dim)
+        return obj
+
 
     @jax.jit
     def step_human(self, s, rng, goals_pos: list=[]):

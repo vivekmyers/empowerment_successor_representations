@@ -12,6 +12,11 @@ import json
 
 @jax.jit
 def rollout_emp(key: jax.random.PRNGKey, policy: agents.Base, s: jnp.array, env):
+    """
+    Rolls out the step in the environment.
+    The assistive agent and the humans choose their next actions based on the same observation of the environment.
+    The humans make the first move, and then the agent attempts their move to update the state.
+    """
     key, rng = jax.random.split(key)
 
     reward = jnp.zeros(args.num_envs)
@@ -25,14 +30,11 @@ def rollout_emp(key: jax.random.PRNGKey, policy: agents.Base, s: jnp.array, env)
         key, rng = jax.random.split(key)
 
         s, done_list, human_actions = env.step_humans(s, rng) # Assume that all the humans take their steps concurrently.
-        # instead of s, now it's human_states_list
 
-        # TODO: change to set states of multiple humans
         env.set_state(s)
 
         s, r, done_list, _ = env.step(r_ac)
 
-        # TODO: change to set states of multiple humans
         env.set_state(s)
 
         reward += r
