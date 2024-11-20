@@ -5,7 +5,7 @@ from enum import IntEnum
 from six import StringIO
 import sys
 import functools
-from humans import noisy_greedy_human_policy, human_types, random_human_policy
+from humans import noisy_greedy_human_policy, human_types, random_human_policy, fixed_ac_policy
 
 @jax.tree_util.register_pytree_node_class
 class MultiAgentGridWorldEnv:
@@ -66,16 +66,13 @@ class MultiAgentGridWorldEnv:
 
         self.num_humans = num_humans
         self.num_goals = num_goals
+        self.grid_size = grid_size
 
         self.human_actions = MultiAgentGridWorldEnv.HumanActions
         self.agent_actions = MultiAgentGridWorldEnv.AgentActions
-        self.action_dim = 2  # one for action, one for box number
 
-        nA = len(self.human_actions) * grid_size**2 # TODO: figure out what this is??
-        self.nA = nA
-
+        self.action_dim = len(self.agent_actions) * self.grid_size**2
         self.state_dim = self.num_boxes * 2 + self.num_humans * 2 # number of state variables in the environment (row, col)
-        self.grid_size = grid_size
 
         self.humans_pos = humans_pos
         self.boxes_pos = boxes_pos
@@ -92,6 +89,7 @@ class MultiAgentGridWorldEnv:
             elif strat == human_types.HumanTypes.RANDOM.name:
                 self.human_policies.append(random_human_policy.RandomHumanPolicy(goals_pos, MultiAgentGridWorldEnv.HumanActions, self.state_dim))
 
+        self.fixed_human_policy = fixed_ac_policy.FixedAcHumanPolicy((goals_pos, MultiAgentGridWorldEnv.HumanActions, self.state_dim))
         assert len(self.human_policies) == self.num_humans
 
 
@@ -143,29 +141,44 @@ class MultiAgentGridWorldEnv:
         self.humans_pos = jnp.array(humans_pos)
         self.boxes_pos = jnp.array(boxes_pos)
         self.goals_pos = jnp.array(goals_pos)
-        self.concat_human_box_states = jnp.concatenate([self.humans_pos, self.boxes_pos])
+        self.concat_human_box_states = jnp.concatenate([self.humans_pos, self.boxes_pos]) # list of tuples
 
         return self.concat_human_box_states
 
+    def inc_(self, box_pos_1, box_pos_2, other_pos_1, other_pos_2, delta):
+        """
+        Moves a box along a grid (either horizontally or vertically) based on the given delta (change in position).
+        Ensures that the box doesn’t collide with other boxes or humans.
+        """
+        target_block = (
+            False  # if target pos has another block or a human, can't move block there)
+        )
+        for i in range(self.num_boxes):
+            update = (box_pos_1 + delta == other_pos_1[i]) & (
+                box_pos_2 == other_pos_2[i]
+            )
+            target_block = target_block | update
 
-    def inc_boxes(self, state_vecs, a):
+        box_pos_1 = (
+            jnp.minimum(jnp.maximum(box_pos_1 + delta, 0), self.grid_size - 1)
+            * (1 - target_block)
+            + box_pos_1 * target_block
+        )
+        return box_pos_1
+
+    def inc_boxes(self, state_vec, a):
         """
         Moves the box positions, based on the agent's move and updates the next state, rewards, done_list
         """
-        boxnum, ac = a[1], a[0]
-        return self._inc_boxes(state_vecs, boxnum, ac, self.goals_pos)
+        gridnum, ac = a[1], a[0]
+        return self._inc_boxes(state_vec, gridnum, ac, self.goals_pos)
 
 
-    # TODO: ALSO TAKE INTO ACCOUNT THE FACT THAT AGENT MAY HAVE TRIED TO MOVE, BUT THEY MAY GET FROZEN
-    def _inc_boxes(self, state_vec, boxnum, ac, goals_pos):
+    def _inc_boxes(self, state_vec, gridnum, ac, goals_pos):
         """
         Private function to move the boxes' positions, based on action of assistive agent
         """
-        human_rows = jnp.array([state_vec[i] for i in range(0, self.num_humans * 2 - 1, 2)])
-        human_cols = jnp.array([state_vec[i] for i in range(1, self.num_humans * 2, 2)])
-
-        b_rows = jnp.array([state_vec[i] for i in range(self.num_humans * 2, self.state_dim - 1, 2)]) #4, 6, 8
-        b_cols = jnp.array([state_vec[i] for i in range(self.num_humans * 2 + 1, self.state_dim, 2)]) # 5, 7, 9
+        human_rows, human_cols, b_rows, b_cols = self.get_humans_boxes_pos_from_state(self, state_vec)
   
         # Check whether humans are already at any of the goals, or whether the box is trying to move into any of the humans' spaces
         humans_at_goals = [[] for i in range(0, len(human_rows))] # num_humans x num_boxes
@@ -184,8 +197,8 @@ class MultiAgentGridWorldEnv:
         humans_at_goals = jnp.array(humans_at_goals)
         already_dones = jnp.array(already_dones)
 
-        b_col = boxnum % self.grid_size
-        b_row = boxnum // self.grid_size
+        b_col = gridnum % self.grid_size
+        b_row = gridnum // self.grid_size
 
         allpos = jnp.stack([b_rows, b_cols], axis=-1)
         boxpos = jnp.array([b_row, b_col])
@@ -231,88 +244,101 @@ class MultiAgentGridWorldEnv:
         return updated_state, r, done
 
 
-    def state_vec(self, s):
-        """
-        Converts a state s into a one-hot encoded vector representation of that state.
-        The positions corresponding to the state values are set to 1, while others remain 0.
-        Each human and each box has a one hot encoding of length grid_size * grid_size.
-        """
-        state_vec_dim = self.state_dim / 2 * (self.grid_size * self.grid_size)
-        svec = jnp.zeros(state_vec_dim)
-        for i in range(self.state_dim):
-            svec[s[i] + i * self.grid_size] = 1 # TODO: check this out...
-        return svec
+    def set_state(self, s):
+        self.concat_human_box_states = s
+
+    
+    def get_humans_boxes_pos_from_state(self, state_vec):
+        human_rows = jnp.array([state_vec[i] for i in range(0, self.num_humans * 2 - 1, 2)])
+        human_cols = jnp.array([state_vec[i] for i in range(1, self.num_humans * 2, 2)])
+
+        b_rows = jnp.array([state_vec[i] for i in range(self.num_humans * 2, self.state_dim - 1, 2)]) #4, 6, 8
+        b_cols = jnp.array([state_vec[i] for i in range(self.num_humans * 2 + 1, self.state_dim, 2)]) # 5, 7, 9
+
+        return human_rows, human_cols, b_rows, b_cols
 
 
-    def inc_(self, box_pos_1, box_pos_2, other_pos_1, other_pos_2, delta):
-        """
-        Moves a box along a grid (either horizontally or vertically) based on the given delta (change in position).
-        Ensures that the box doesn’t collide with other boxes or humans.
-        """
-        target_block = (
-            False  # if target pos has another block or a human, can't move block there)
-        )
-        for i in range(self.num_boxes):
-            update = (box_pos_1 + delta == other_pos_1[i]) & (
-                box_pos_2 == other_pos_2[i]
-            )
-            target_block = target_block | update
-
-        box_pos_1 = (
-            jnp.minimum(jnp.maximum(box_pos_1 + delta, 0), self.grid_size - 1)
-            * (1 - target_block)
-            + box_pos_1 * target_block
-        )
-        return box_pos_1
-
-
-# TODO: I don't think that this transformation works well anymore with a fifth action?
-# ===============================
     def a_vec_to_idx(self, action):
+        """
+        Converts [agent_action, gridnum] to an index of an action within the action vector.
+        """
         return action[0] + action[1] * len(self.agent_actions)
 
     @jax.jit
     def a_idx_to_vec(self, a):
-        # agent_action is the zeroth index of action_vec
-        # boxnum is the first index of action_vec 
+        """
+        Converts an index of an action within the action vector of num_actions * grid_size**2 to 
+        the corresponding AgentAction and gridnum where the action is taking place.
+        Returns [agent_action, gridnum]
+        """
         action_vec = []
         action_vec.append(a % len(self.agent_actions))
         action_vec.append(a // len(self.agent_actions))
         return action_vec
     
-# ===========================
+    def convert_gridnum_to_pos_tuple(self, gridnum):
+        row = gridnum // self.grid_size
+        col = self.grid_size**2 % gridnum
+        return row, col
 
-    def set_state(self, s):
-        print("This is concat human box states", s)
-        self.concat_human_box_states = s
 
-    # TODO: finish
-    def step_humans(self, s, rng):
+    def step_humans(self, state_vec, rng, agent_ac):
         """
         Returns the new state of the environment, a boolean list of whether each agent is done, and the human actions.
         Each human agent concurrently takes a step based on the current environment.
         """
+        human_rows, human_cols, b_rows, b_cols = self.get_humans_boxes_pos_from_state(state_vec=state_vec)
+        agent_freezes_human = self.agent_freezes_human(agent_ac)
+        agent_ac_gridnum = self.a_idx_to_vec(agent_ac)[1]
+        agent_row, agent_col = self.convert_gridnum_to_pos_tuple(agent_ac_gridnum)
+        agent_ac_pos = [agent_row, agent_col]
+
         next_human_states = []
         done_list = []
         human_actions = []
-        for human_policy in self.human_policies:
-            s_next, done, ac = human_policy.step_human(s, rng, self.goals_pos)
-            next_human_states.append(s_next)
+        for human_idx in range(0, len(self.human_policies)):
+            human_policy = self.human_policies[human_idx]
+            current_human_state = [human_rows[human_idx], human_cols[human_idx]]
+            print("DEBUG: The current human state is", current_human_state)
+            print("DEBUG: the agent_ac_gridnum converted to state pos is", agent_ac_pos)
+            if agent_freezes_human and agent_ac_pos == current_human_state:
+                print(f"DEBUG: agent is making the human {human_idx} stay at {current_human_state}")
+                stay_ac = self.HumanActions.stay.value
+                next_human_state, done, ac = self.fixed_human_policy.step_human(human_rows, human_cols, b_rows, b_cols, human_idx, stay_ac, rng, self.goals_pos)
+            else:
+                next_human_state, done, ac = human_policy.step_human(state_vec, human_idx, rng, self.goals_pos) # Returns the human's states only without boxes
+            next_human_states.append(next_human_state) 
             done_list.append(done)
             human_actions.append(ac)
 
-        next_state = self._reconcile_human_states(next_human_states)
+        reconciled_state, reconciled_done_list, reconciled_human_ac = self._reconcile_human_states(next_human_states, human_rows, human_cols, b_rows, b_cols, human_actions, done_list)
 
-        return next_state, done_list, human_actions
+        return reconciled_state, reconciled_done_list, reconciled_human_ac
     
-    def _reconcile_human_states(self, human_states):
-        # TODO: write!! 
+    def _reconcile_human_states(self, human_states, original_human_rows, original_human_cols, b_rows, b_cols, human_actions, done_list):
         """
         If both agents choose to go to the same location, then neither of them are able to move.
         Then, we should return not just the new state, but also update the done_list and human_actions as a result
         """
-        print("These are the human_states: ", human_states)
-        pass
+        original_human_states = jnp.array(list(zip(original_human_rows, original_human_cols)))
+        reconciled_human_states = human_states
+        reconciled_human_actions = human_actions
+        reconciled_done_list = done_list
+        assert len(human_states == len(original_human_states)), "Length of human states and of original human states doesn't match"
+
+        for i in range(0, len(human_states)):
+            for j in range(i + 1, len(human_states)):
+                if jnp.array_equal(human_states[i], human_states[j]):  # Check if rows i and j are the same
+                    reconciled_human_states = reconciled_human_states.at[i].set(original_human_states.at[i])
+                    reconciled_human_actions = reconciled_human_actions.at[i].set(self.human_actions.stay.value)
+
+        final_state_vec = jnp.concatenate(reconciled_human_states, jnp.array(list(zip(b_rows, b_cols))))
+
+        for i in range(0, len(reconciled_human_states)):
+            reconciled_done_list = reconciled_done_list.at[i].set(jnp.all(reconciled_human_states[i] in self.goals_pos).item())
+
+        return final_state_vec, reconciled_done_list, reconciled_human_actions
+            
     
     @functools.partial(jax.jit, static_argnums=(1,))
     def step(self, a):
@@ -322,6 +348,14 @@ class MultiAgentGridWorldEnv:
         s_next, r, done = self.inc_boxes(self.concat_human_box_states, self.a_idx_to_vec(a))
         # assert self.valid(s_next) or done, "Cannot move into a box"
         return s_next, r, done, {}
+    
+    def agent_freezes_human(self, a) -> bool:
+        """
+        Returns True if it's the agent freeze action, since that is taken care of in step_humans to force human to stay
+        """
+        agent_ac = self.a_idx_to_vec(a)[0]
+        return agent_ac == self.AgentActions.freeze_agent.value
+    
 
     # def valid(self, s):
     #     assert len(s) == self.state_dim
@@ -369,6 +403,15 @@ class MultiAgentGridWorldEnv:
 
     @jax.jit
     def image_array(self, s):
+        """
+        Creates image array to be saved in WandB
+        NOTE: this is hardcoded to only work for two humans, since each human is a different color.
+        """
+        goal_color = jnp.array([120, 215, 10]).astype(jnp.uint8) # green
+        human_colors = jnp.array([jnp.array([210, 153, 0]).astype(jnp.uint8), jnp.array([0, 57, 210]).astype(jnp.uint8)]) # orange (human the agent is supposed to empower), and blue
+        block_color = jnp.array([100, 0, 215]).astype(jnp.uint8) # purple
+
+        # Retrieve the appropriate positions on the grid
         grid = self.grid_size
         goals_list = self.goals_pos
         arr = jnp.zeros((3, grid, grid), dtype=jnp.uint8) + 50
@@ -379,25 +422,28 @@ class MultiAgentGridWorldEnv:
             goal_row, goal_col = goal[0], goal[1]
             goal_rows.append(goal_row)
             goal_cols.append(goal_col)
+        goals_pos = zip(goal_rows, goal_cols)
 
-        row, col = s[0], s[1] # TODO: fix so that it's not just the one agent scenario??
-        b_rows = [s[i] for i in range(2, self.state_dim - 1, 2)]
-        b_cols = [s[i] for i in range(3, self.state_dim, 2)]
+        human_rows, human_cols, b_rows, b_cols = self.get_humans_boxes_pos_from_state(s)
+        human_pos = zip(human_rows, human_cols)
 
-        c_goal = jnp.array([120, 215, 10]).astype(jnp.uint8)
-        c_human = jnp.array([210, 153, 0]).astype(jnp.uint8)
-        c_block = jnp.array([100, 0, 215]).astype(jnp.uint8)
+        # Set the colors in the image array
+        for i in range (0, len(human_pos)):
+            human_row, human_col = human_pos[i]
+            arr = arr.at[:, human_row, human_col].set(human_colors[i]) 
 
-        arr = arr.at[:, row, col].set(c_human)
-        arr = arr.at[:, goal_row, goal_col].set(c_goal)
+        for i in range(0, len(goals_pos)):
+            goal_row, goal_col = goals_pos[i]
+            arr = arr.at[:, goal_row, goal_col].set(goal_color)
+
+        # Interpolate block color with goal color, in case it overlaps with the goal
         for box_row, box_col in zip(b_rows, b_cols):
-            for goal_row, goal_col in zip(goal_rows, goal_cols): # TODO: I think this is correct?
+            for goal_row, goal_col in zip(goal_rows, goal_cols):
                 color = (
-                    c_block
+                    block_color
                     + ((box_row == goal_row) & (box_col == goal_col))
-                    * (c_goal - c_block)
+                    * (goal_color - block_color)
                     / 3
-                    + ((box_row == row) & (box_col == col)) * (c_human - c_block) / 3
                 )
                 color = color.astype(jnp.uint8)
                 arr = arr.at[:, box_row, box_col].set(color)
@@ -405,6 +451,9 @@ class MultiAgentGridWorldEnv:
         return arr
 
     def render(self, filename=None, mode="human"):
+        """
+        Can render the state to stdout
+        """
         if filename is None:
             outfile = StringIO() if mode == "ansi" else sys.stdout
             colorize = True
@@ -413,9 +462,7 @@ class MultiAgentGridWorldEnv:
             colorize = False
 
         state_vec = self.concat_human_box_states
-        row, col = state_vec[0], state_vec[1] # TODO: is this the human agent's position?? If so, need to change it!!
-        b_rows = [state_vec[i] for i in range(2, self.state_dim - 1, 2)]
-        b_cols = [state_vec[i] for i in range(3, self.state_dim, 2)]
+        human_rows, human_cols, b_rows, b_cols = self.get_humans_boxes_pos_from_state(state_vec)
 
         goal_rows = []
         goal_cols = []
@@ -425,22 +472,24 @@ class MultiAgentGridWorldEnv:
             goal_cols.append(g_col)
 
         desc = [["0" for _ in range(self.grid_size)] for _ in range(self.grid_size)]
-        desc[row][col] = "1"
-        if colorize:
-            desc[row][col] = utils.colorize(desc[row][col], "red", highlight=True)
 
-        for goal_row, goal_col in zip(goal_rows, goal_cols):
-            desc[goal_row][goal_col] = "3"
+        for human_row, human_col in zip(human_rows, human_cols):
+            desc[human_row][human_col] = "1"  # NOTE: index doesn't currently differentiate between different humans
             if colorize:
-                desc[goal_row][goal_col] = utils.colorize(
-                    desc[goal_row][goal_col], "green", highlight=True
-                )
+                desc[human_row][human_col] = utils.colorize(desc[human_row][human_col], "red", highlight=True) # NOTE: color doesn't currently differentiate between different humans
 
         for box_row, box_col in zip(b_rows, b_cols):
             desc[box_row][box_col] = "2"
             if colorize:
                 desc[box_row][box_col] = utils.colorize(
                     desc[box_row][box_col], "blue", highlight=True
+                )
+
+        for goal_row, goal_col in zip(goal_rows, goal_cols):
+            desc[goal_row][goal_col] = "3"
+            if colorize:
+                desc[goal_row][goal_col] = utils.colorize(
+                    desc[goal_row][goal_col], "green", highlight=True
                 )
 
         outfile.write("\n".join("".join(line) for line in desc) + "\n")

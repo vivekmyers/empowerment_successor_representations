@@ -14,26 +14,31 @@ import json
 def rollout_emp(key: jax.random.PRNGKey, policy: agents.Base, s: jnp.array, env):
     """
     Rolls out the step in the environment.
-    The assistive agent and the humans choose their next actions based on the same observation of the environment.
-    The humans make the first move, and then the agent attempts their move to update the state.
     """
     key, rng = jax.random.split(key)
-
-    reward = jnp.zeros(args.num_envs)
+    reward = jnp.zeros(args.num_envs) # this is a 1D array of the num of envs
 
     def step_fn(carry, _):
-        s, reward, key, policy, env = carry
+        """
+        One forward step in the gridworld env.
+        The assistive agent and the humans choose their next actions based on the same observation of the environment.
+        The humans make the first move, and then the agent attempts their move to update the state.
+        The agent's action is input into the env.step_humans func in case it is the freeze action, in which case the agent must stay.
+        """
+        s, reward, key, policy, env, game_done = carry
         obs = s
 
         r_ac, info = policy.next_action(obs)
 
         key, rng = jax.random.split(key)
 
-        s, done_list, human_actions = env.step_humans(s, rng) # Assume that all the humans take their steps concurrently.
+        s, done_list_humans, human_actions = env.step_humans(s, rng, r_ac) # s is a list of [x, y] positions
+        # Assumes that all the humans take their steps concurrently.
 
         env.set_state(s)
 
-        s, r, done_list, _ = env.step(r_ac)
+        if not env.agent_freezes_human(r_ac):
+            s, r, done_list_agent, _ = env.step(r_ac)
 
         env.set_state(s)
 
@@ -41,23 +46,30 @@ def rollout_emp(key: jax.random.PRNGKey, policy: agents.Base, s: jnp.array, env)
 
         return (s, reward, key, policy, env), (r_ac, human_actions, obs, info)
 
+    # Efficiently process forward steps in a functional way
     (_, reward, _, _, _), aux = jax.lax.scan(
         step_fn, (s, reward, key, policy, env), None, length=args.max_steps
     )
+    print("This is reward's shape from step_fun lax scan: ", reward.shape)
 
     # TODO: have to rewrite this map for multiple people!
     acs_r, acs_h, trajs, infos = jax.tree_map(lambda x: jnp.moveaxis(x, 1, 0), aux) # Get the human trajectories from each step
 
     info = jax.tree_map(lambda x: x[0].mean(), infos)
 
-    succ = jnp.mean(reward > 0)
-    total_reward = jnp.mean(reward)
+    succ = jnp.mean(reward > 0, axis=1) # averages for each human across the goals I think
+    total_reward = jnp.mean(reward, axis=1)
 
     def observe_fn(pi, aux):
-        tau, ar, ah = aux
+        """
+        pi: policy being updated
+        aux: trajectories, agent rewards, human actions
+        """
+        tau, ar, ah = aux # observations, agent rewards, human actions
         tau = jnp.astype(tau, jnp.float32)
         return pi.observe(tau, ar, ah), None
     
+    # Efficiently process observe steps in a functional way
     policy, _ = jax.lax.scan(observe_fn, policy, (trajs, acs_r, acs_h))
 
     policy, inf = policy.update()
@@ -187,11 +199,10 @@ if __name__ == "__main__":
     key, rng = jax.random.split(key)
     
     config = vars(args)
-
     config["env_name"] = "gridworld"
 
     if args.random:
-        policy = agents.RandomEmpowermentPolicy(rng, env.state_dim, env.nA)
+        policy = agents.RandomEmpowermentPolicy(rng, env.state_dim, env.action_dim)
         config["method"] = "random"
         wandb.init(project="multi_empowerment", config=config, id="random-" + wandbid)
     elif args.ave:
@@ -199,7 +210,7 @@ if __name__ == "__main__":
             rng,
             networks=networks.gridworld,
             s_dim=env.state_dim,
-            a_dim=env.nA,
+            a_dim=env.action_dim,
             step_human=env.step_human_action,
             policy_lr=args.policy_lr,
             hidden_dim=args.hidden_dim,
@@ -229,7 +240,7 @@ if __name__ == "__main__":
             rng,
             networks=networks.gridworld,
             s_dim=env.state_dim,
-            a_dim=env.nA,
+            a_dim=env.action_dim,
             policy_lr=args.policy_lr,
             repr_lr=args.repr_lr,
             repr_dim=args.repr_dim,

@@ -4,9 +4,10 @@ import jax.numpy as jnp
 import random
 
 @jax.tree_util.register_pytree_node_class
-class RandomHumanPolicy():
+class FixedAcHumanPolicy():
     """
     Note: this human policy only works on the multiagent gridworld env
+    Does not choose action - it's instead an input in its step function.
     """
 
     def __init__(
@@ -33,24 +34,23 @@ class RandomHumanPolicy():
 
 
     @jax.jit
-    def step_human(self, human_rows, human_cols, b_rows, b_cols, human_idx, rng, goals_pos: list=[]):
-        next_human_state, done, ac = self._step_human(human_rows, human_cols, b_rows, b_cols, human_idx, rng, goals_pos)
+    def step_human(self, human_rows, human_cols, b_rows, b_cols, human_idx, ac, rng, goals_pos: list=[]):
+        next_human_state, new_state, done, ac = self._step_human(human_rows, human_cols, b_rows, b_cols, human_idx, rng, goals_pos)
         # assert self.valid(s_next), "Cannot move into a box"
         return next_human_state, done, ac
     
     @jax.jit
-    def _step_human(self, human_rows, human_cols, b_rows, b_cols, human_idx, rng, goals_pos):
+    def _fixed_step_human(self, human_rows, human_cols, b_rows, b_cols, human_idx, ac, rng, goals_pos):
         """
-        Randomly chooses an action for human to take a step
+        Executes the given action
         """
         row, col = human_rows[human_idx], human_cols[human_idx]
         original_row, original_col = row, col
+
         # Can't move into same pos as any box
         nop = jnp.any(
             jnp.logical_and(jnp.array(b_rows) == row, jnp.array(b_cols) == col)
         ) | jnp.array_equal([row, col], goals_pos)
-
-        ac = jax.random.randint(rng, (), minval=0, maxval=len(self.actions) - 1)
 
         if ac == self.actions.left:
             col = self.inc_(col, row, b_cols, b_rows, -1)

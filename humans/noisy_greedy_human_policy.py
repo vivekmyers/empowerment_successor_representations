@@ -37,16 +37,16 @@ class NoisyGreedyHumanPolicy():
 
 
     @jax.jit
-    def step_human(self, s, rng, goals_pos: list=[]):
+    def step_human(self, human_rows, human_cols, b_rows, b_cols, human_idx, rng, goals_pos: list=[]):
         if len(goals_pos) == 0:
             goals_pos = self.goals_pos
 
-        s_next, done, ac = self._step_human(s, goals_pos, rng)
+        next_human_state, done, ac = self._step_human(human_rows, human_cols, b_rows, b_cols, human_idx, rng, goals_pos)
         # assert self.valid(s_next), "Cannot move into a box"
-        return s_next, done, ac
+        return next_human_state, done, ac
 
     @jax.jit
-    def _step_human(self, s, goals_pos, rng):
+    def _step_human(self, human_rows, human_cols, b_rows, b_cols, human_idx, rng, goals_pos):
         """
         Tries out each potential action to see which one takes the human closest to goal. 
         The human chooses this action, with some random noise 
@@ -60,9 +60,8 @@ class NoisyGreedyHumanPolicy():
             rows = []
             cols = []
 
-            row, col = s[0], s[1]  # current human position
-            b_rows = [s[i] for i in range(2, self.state_dim - 1, 2)]  # boxes rows
-            b_cols = [s[i] for i in range(3, self.state_dim, 2)]  # boxes cols
+            row, col = human_rows[human_idx], human_cols[human_idx]
+
             nop = jnp.any(
                 jnp.logical_and(jnp.array(b_rows) == row, jnp.array(b_cols) == col)
             ) | jnp.array_equal([row, col], human_goal)
@@ -120,14 +119,18 @@ class NoisyGreedyHumanPolicy():
         best_row = rows_list[best_goal_idx][best_ac]
         best_col = cols_list[best_goal_idx][best_ac]
 
-        new_state = [best_row, best_col] + sum(
-            ([x, y] for x, y in zip(b_rows, b_cols)), []
-        )
-        # TODO: figure out how this new_state thing works...
-        new_state = jnp.array(new_state) * (1 - nop) + jnp.array(s) * nop
-        done = jnp.array_equal([best_row, best_col], human_goal) | nop
+        if not nop:
+            next_human_state = (best_row, best_col)
+        else:
+            next_human_state = row, col
 
-        return new_state, done, best_ac
+        # new_state = [best_row, best_col] + sum(
+        #     ([x, y] for x, y in zip(b_rows, b_cols)), []
+        # )
+        # new_state = jnp.array(new_state) * (1 - nop) + jnp.array(s) * nop 
+        done = jnp.any(jnp.all(next_human_state in goals_pos)) | nop
+
+        return next_human_state, done, best_ac
 
     # def human_dist_to_goal(self, s, goal_states):
     #     # return distance to each goal in goal_states
