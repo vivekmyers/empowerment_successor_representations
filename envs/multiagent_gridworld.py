@@ -58,8 +58,8 @@ class MultiAgentGridWorldEnv:
         """
 
         self.num_boxes = num_boxes
-        if (num_boxes != int(len(boxes_pos) / 2)):
-            print("DEBUG: This is boxes_pos length:", int(len(boxes_pos) / 2))
+        # if (num_boxes != int(len(boxes_pos) / 2)):
+        #     print("DEBUG: This is boxes_pos length:", int(len(boxes_pos) / 2))
     
         # assert num_boxes == int(len(boxes_pos) / 2), "Number of boxes does not match" # TODO BUG: boxes_pos is appended to at every step, so that it becomes 50 steps long...
         assert self.num_boxes > 0, "Cannot have 0 Boxes"
@@ -89,7 +89,7 @@ class MultiAgentGridWorldEnv:
             elif strat == human_types.HumanTypes.RANDOM.name:
                 self.human_policies.append(random_human_policy.RandomHumanPolicy(goals_pos, MultiAgentGridWorldEnv.HumanActions, self.state_dim))
 
-        self.fixed_human_policy = fixed_ac_policy.FixedAcHumanPolicy((goals_pos, MultiAgentGridWorldEnv.HumanActions, self.state_dim))
+        self.fixed_human_policy = fixed_ac_policy.FixedAcHumanPolicy(goals_pos, MultiAgentGridWorldEnv.HumanActions, self.state_dim)
         assert len(self.human_policies) == self.num_humans
 
 
@@ -105,21 +105,17 @@ class MultiAgentGridWorldEnv:
         while len(humans_pos) < 2 * num_humans:
             key, subkey = jax.random.split(key)
             human_pos = tuple(jax.random.randint(subkey, (2,), 0, self.grid_size))
-            human_pos_tups = [
-                tuple(humans_pos[i : i + 2]) for i in range(0, len(humans_pos), 2)
-            ]
+            human_pos_tups = [tuple(humans_pos[i : i + 2]) for i in range(0, len(humans_pos), 2)]
             if human_pos not in human_pos_tups:
                 humans_pos += human_pos
 
         human_pos_tups = [tuple(humans_pos[i : i + 2]) for i in range(0, len(humans_pos), 2)]
-
+  
         boxes_pos = []
         while len(boxes_pos) < 2 * num_boxes:
             key, subkey = jax.random.split(key)
             box_pos = tuple(jax.random.randint(subkey, (2,), 0, self.grid_size))
-            box_pos_tups = [
-                tuple(boxes_pos[i : i + 2]) for i in range(0, len(boxes_pos), 2)
-            ]
+            box_pos_tups = [tuple(boxes_pos[i : i + 2]) for i in range(0, len(boxes_pos), 2)]
             if box_pos not in box_pos_tups and box_pos not in human_pos_tups:
                 boxes_pos += box_pos
 
@@ -141,7 +137,9 @@ class MultiAgentGridWorldEnv:
         self.humans_pos = jnp.array(humans_pos)
         self.boxes_pos = jnp.array(boxes_pos)
         self.goals_pos = jnp.array(goals_pos)
+        print("DEBUG: this is goals_pos: ", goals_pos)
         self.concat_human_box_states = jnp.concatenate([self.humans_pos, self.boxes_pos]) # list of tuples
+        print("DEBUG: this is concat_human_box_states: ", self.concat_human_box_states)
 
         return self.concat_human_box_states
 
@@ -170,15 +168,15 @@ class MultiAgentGridWorldEnv:
         """
         Moves the box positions, based on the agent's move and updates the next state, rewards, done_list
         """
-        gridnum, ac = a[1], a[0]
-        return self._inc_boxes(state_vec, gridnum, ac, self.goals_pos)
+        gridnum, agent_action_index = a[1], a[0]
+        return self._inc_boxes(state_vec, gridnum, agent_action_index, self.goals_pos)
 
 
-    def _inc_boxes(self, state_vec, gridnum, ac, goals_pos):
+    def _inc_boxes(self, state_vec, gridnum, agent_action_idx, goals_pos):
         """
         Private function to move the boxes' positions, based on action of assistive agent
         """
-        human_rows, human_cols, b_rows, b_cols = self.get_humans_boxes_pos_from_state(self, state_vec)
+        human_rows, human_cols, b_rows, b_cols = self.get_humans_boxes_pos_from_state(state_vec)
   
         # Check whether humans are already at any of the goals, or whether the box is trying to move into any of the humans' spaces
         humans_at_goals = [[] for i in range(0, len(human_rows))] # num_humans x num_boxes
@@ -219,8 +217,10 @@ class MultiAgentGridWorldEnv:
             lambda: (b_row, self.inc_(b_col, b_row, other_cols, other_rows, 1)), # Right
             lambda: (self.inc_(b_row, b_col, other_rows, other_cols, -1), b_col), # Up
             lambda: (b_row, b_col), # Stay
+            lambda: (b_row, b_col), # Freeze human (box doesn't move)
         ]
-        b_row, b_col = jax.lax.switch(ac, vals)
+        b_row, b_col = jax.lax.switch(agent_action_idx, vals)
+        print("!!! DEBUG: This is b_row, b_col: ", b_row, b_col)
 
         b_cols = b_cols.at[box].set(b_col)
         b_rows = b_rows.at[box].set(b_row)
@@ -249,22 +249,32 @@ class MultiAgentGridWorldEnv:
 
     
     def get_humans_boxes_pos_from_state(self, state_vec):
+        state_vec = state_vec.flatten()
+        # print("!!! DEBUG: this is state_vec: ", state_vec)
+        # print("!!! DEBUG: this is 0th index of state_vec: ", state_vec[0])
         human_rows = jnp.array([state_vec[i] for i in range(0, self.num_humans * 2 - 1, 2)])
+        # print("!!! DEBUG: this is human_rows: ", human_rows)
         human_cols = jnp.array([state_vec[i] for i in range(1, self.num_humans * 2, 2)])
+        # print("!!! DEBUG: this is human_cols: ", human_cols)
 
         b_rows = jnp.array([state_vec[i] for i in range(self.num_humans * 2, self.state_dim - 1, 2)]) #4, 6, 8
+        # print("!!! DEBUG: this is b_rows: ", b_rows)
         b_cols = jnp.array([state_vec[i] for i in range(self.num_humans * 2 + 1, self.state_dim, 2)]) # 5, 7, 9
+        # print("!!! DEBUG: this is b_cols: ", b_cols)
 
         return human_rows, human_cols, b_rows, b_cols
 
 
-    def a_vec_to_idx(self, action):
-        """
-        Converts [agent_action, gridnum] to an index of an action within the action vector.
-        """
-        return action[0] + action[1] * len(self.agent_actions)
+    # def a_vec_to_idx(self, action):
+    #     """
+    #     Converts [agent_action, gridnum] to an index of an action within the action vector.
+    #     """
+    #     idx = action[0] + action[1] * len(self.agent_actions)
+    #     print("DEBUG: THIS IS IDX: ", idx)
+    #     return idx
 
-    @jax.jit
+
+    @functools.partial(jax.jit, static_argnums=(1,))
     def a_idx_to_vec(self, a):
         """
         Converts an index of an action within the action vector of num_actions * grid_size**2 to 
@@ -272,15 +282,19 @@ class MultiAgentGridWorldEnv:
         Returns [agent_action, gridnum]
         """
         action_vec = []
+        # print("DEBUG: this is a: ", a)
+        # print("DEBUG: this is len(self.agent_actions): ", len(self.agent_actions))
         action_vec.append(a % len(self.agent_actions))
         action_vec.append(a // len(self.agent_actions))
         return action_vec
     
     def convert_gridnum_to_pos_tuple(self, gridnum):
+        """
+        Converts gridnum position to a position tuple
+        """
         row = gridnum // self.grid_size
         col = self.grid_size**2 % gridnum
         return row, col
-
 
     def step_humans(self, state_vec, rng, agent_ac):
         """
@@ -288,25 +302,60 @@ class MultiAgentGridWorldEnv:
         Each human agent concurrently takes a step based on the current environment.
         """
         human_rows, human_cols, b_rows, b_cols = self.get_humans_boxes_pos_from_state(state_vec=state_vec)
-        agent_freezes_human = self.agent_freezes_human(agent_ac)
+
+        agent_action_idx = self.a_idx_to_vec(agent_ac)[0]
+        agent_freezes_human = self.agent_freezes_human(agent_action_idx) # this is a bool array of len 1
+        print("!!! DEBUG: this is agent_freezes_human: ", agent_freezes_human)
+
         agent_ac_gridnum = self.a_idx_to_vec(agent_ac)[1]
+
         agent_row, agent_col = self.convert_gridnum_to_pos_tuple(agent_ac_gridnum)
         agent_ac_pos = [agent_row, agent_col]
 
         next_human_states = []
         done_list = []
         human_actions = []
+
+        def handle_agent_freeze(agent_freezes_human, agent_ac_pos, current_human_state):
+            # Combine conditions into a single JAX boolean
+            print("agent_freezes_human: ", agent_freezes_human)
+            print("agent_ac_pos: ", agent_ac_pos)
+            condition = agent_freezes_human & jnp.all(agent_ac_pos == current_human_state)
+
+            def do_if_true():
+                stay_ac = self.HumanActions.stay.value
+                next_human_state, done, ac = self.fixed_human_policy.step_human(human_rows, human_cols, b_rows, b_cols, human_idx, stay_ac, rng, self.goals_pos)
+                return next_human_state, done, ac
+            
+            def do_if_false():
+                next_human_state, done, ac = human_policy.step_human(state_vec, human_idx, rng, self.goals_pos) # Returns the human's states only without boxes
+                return next_human_state, done, ac
+
+            # Use jax.lax.cond to branch based on the condition
+            result = jax.lax.cond(
+                condition,
+                lambda _: do_if_true(),  # Function executed if condition is True
+                lambda _: do_if_false(),  # Function executed if condition is False
+                operand=None  # Optional data passed to the lambdas
+            )
+            return result
+
         for human_idx in range(0, len(self.human_policies)):
             human_policy = self.human_policies[human_idx]
             current_human_state = [human_rows[human_idx], human_cols[human_idx]]
-            print("DEBUG: The current human state is", current_human_state)
-            print("DEBUG: the agent_ac_gridnum converted to state pos is", agent_ac_pos)
-            if agent_freezes_human and agent_ac_pos == current_human_state:
-                print(f"DEBUG: agent is making the human {human_idx} stay at {current_human_state}")
-                stay_ac = self.HumanActions.stay.value
-                next_human_state, done, ac = self.fixed_human_policy.step_human(human_rows, human_cols, b_rows, b_cols, human_idx, stay_ac, rng, self.goals_pos)
-            else:
-                next_human_state, done, ac = human_policy.step_human(state_vec, human_idx, rng, self.goals_pos) # Returns the human's states only without boxes
+            print("DEBUG: The current human state is: {}", current_human_state)
+
+            # TODO: delete once I verify that the jax.lax.cond works
+            # if bool(agent_freezes_human):
+            #     if jnp.all(agent_ac_pos == current_human_state):
+            #         print(f"DEBUG: agent is making the human {human_idx} stay at {current_human_state}")
+            #         stay_ac = self.HumanActions.stay.value
+            #         next_human_state, done, ac = self.fixed_human_policy.step_human(human_rows, human_cols, b_rows, b_cols, human_idx, stay_ac, rng, self.goals_pos)
+            # else:
+            #     next_human_state, done, ac = human_policy.step_human(state_vec, human_idx, rng, self.goals_pos) # Returns the human's states only without boxes
+            
+            next_human_state, done, ac = handle_agent_freeze(agent_freezes_human, agent_ac_pos, current_human_state)
+
             next_human_states.append(next_human_state) 
             done_list.append(done)
             human_actions.append(ac)
@@ -349,14 +398,16 @@ class MultiAgentGridWorldEnv:
         # assert self.valid(s_next) or done, "Cannot move into a box"
         return s_next, r, done, {}
     
-    def agent_freezes_human(self, a) -> bool:
+    @functools.partial(jax.jit, static_argnums=(1,)) 
+    def agent_freezes_human(self, agent_action_idx):
         """
         Returns True if it's the agent freeze action, since that is taken care of in step_humans to force human to stay
         """
-        agent_ac = self.a_idx_to_vec(a)[0]
-        return agent_ac == self.AgentActions.freeze_agent.value
+        print("!!! DEBUG: this is the agent action index: ", agent_action_idx)
+        is_freeze_action = agent_action_idx == self.AgentActions.freeze_agent.value
+        print("!!! DEBUG: is_freeze_action: {}", is_freeze_action)
+        return is_freeze_action
     
-
     # def valid(self, s):
     #     assert len(s) == self.state_dim
     #     boxes_pos = [(s[i], s[i + 1]) for i in range(2, self.state_dim - 1, 2)]

@@ -15,11 +15,23 @@ class RandomEmpowermentPolicy(Pytree, Base, mutable=True):
         self.num_steps = 0
         self.buffer = buffers.ContrastiveBuffer(s_dim, size=10, gamma=0.9, batch_size=64)
 
+    
+    def _tree_flatten(self):
+        children = (self.buffer)  # arrays / dynamic values
+        aux_data = (self.key, self.a_dim, self.num_steps)  # static values
+        return (children, aux_data)
+
+    @classmethod
+    def _tree_unflatten(cls, aux, children):
+        buffer = children
+        key, a_dim, num_steps = aux
+        obj = cls(buffer, key, a_dim, num_steps)
+        return obj
+
     def next_action(self, s):
-        self.key, key = jax.random.split(self.key)
-        a = jax.random.randint(key, (s.shape[:-1]), 0, self.a_dim) # key, shape, minval, maxval
+        a = jax.random.randint(self.key, (s.shape[:-1]), 0, self.a_dim) # key, shape, minval, maxval
         # NOTE: currently can move boxes or freeze an agent at any position
-        print("This is the action taken by assistive agent: ", a)
+        jax.debug.print("This is the action taken by assistive agent: {}", a)
         return a, {'action': a}
 
     def observe(self, s, a_r, a_h):

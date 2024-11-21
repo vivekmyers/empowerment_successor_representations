@@ -19,7 +19,6 @@ class FixedAcHumanPolicy():
         self.goals_pos = goals_pos
         self.actions = actions
         self.state_dim = state_dim
-        jax.random.key(0)
 
     def tree_flatten(self):
         children = ()

@@ -12,7 +12,11 @@ Also tests the train grid loop potentially?
     # Also check that boxes cannot go through people and vice versa
 # c) Make sure that the agent behaves as expected
     # Make sure that it can actually freeze agent and it works as expected
-# d) Make sure the rewards are given as expected
-# e) Make sure it actually terminates as expected
 
 # TODO: replace all the random assert statements throughout the code and put them in here...
+
+def test_convert_gridnum_to_pos_tuple():
+    pass
+
+def test_agent_freezes_human():
+    pass

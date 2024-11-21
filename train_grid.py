@@ -25,38 +25,41 @@ def rollout_emp(key: jax.random.PRNGKey, policy: agents.Base, s: jnp.array, env)
         The humans make the first move, and then the agent attempts their move to update the state.
         The agent's action is input into the env.step_humans func in case it is the freeze action, in which case the agent must stay.
         """
-        s, reward, key, policy, env, game_done = carry
+        s, reward, key, policy, env = carry
         obs = s
+        print("DEBUG: This is obs: ", obs)
 
-        r_ac, info = policy.next_action(obs)
+        agent_action, info = policy.next_action(obs) # info is a dictionary with the different info about the agent's action
+        print("DEBUG: this is agent_action: ", agent_action)
+        print("DEBUG: this is info: ", info)
 
         key, rng = jax.random.split(key)
 
-        s, done_list_humans, human_actions = env.step_humans(s, rng, r_ac) # s is a list of [x, y] positions
+        s, done, human_actions = env.step_humans(s, rng, agent_action) # s is a list of [x, y] positions
         # Assumes that all the humans take their steps concurrently.
 
         env.set_state(s)
 
-        if not env.agent_freezes_human(r_ac):
-            s, r, done_list_agent, _ = env.step(r_ac)
+        s, r, done, _ = env.step(agent_action) # no-op if the action was an agent freeze human
 
         env.set_state(s)
 
         reward += r
 
-        return (s, reward, key, policy, env), (r_ac, human_actions, obs, info)
+        return (s, reward, key, policy, env), (agent_action, human_actions, obs, info)
 
     # Efficiently process forward steps in a functional way
     (_, reward, _, _, _), aux = jax.lax.scan(
         step_fn, (s, reward, key, policy, env), None, length=args.max_steps
     )
-    print("This is reward's shape from step_fun lax scan: ", reward.shape)
+    print("This is reward's shape from step_fn lax scan: ", reward.shape)
 
-    # TODO: have to rewrite this map for multiple people!
-    acs_r, acs_h, trajs, infos = jax.tree_map(lambda x: jnp.moveaxis(x, 1, 0), aux) # Get the human trajectories from each step
+    # Transposes the auxiliary data from the aux data from step_fn
+    agent_action, human_actions, obs, info = jax.tree_map(lambda x: jnp.moveaxis(x, 1, 0), aux)
 
-    info = jax.tree_map(lambda x: x[0].mean(), infos)
+    info = jax.tree_map(lambda x: x[0].mean(), info)
 
+    # TODO maybe: make sure succ and total reward are being computed correctly!
     succ = jnp.mean(reward > 0, axis=1) # averages for each human across the goals I think
     total_reward = jnp.mean(reward, axis=1)
 
@@ -70,12 +73,12 @@ def rollout_emp(key: jax.random.PRNGKey, policy: agents.Base, s: jnp.array, env)
         return pi.observe(tau, ar, ah), None
     
     # Efficiently process observe steps in a functional way
-    policy, _ = jax.lax.scan(observe_fn, policy, (trajs, acs_r, acs_h))
+    policy, _ = jax.lax.scan(observe_fn, policy, (obs, agent_action, human_actions))
 
     policy, inf = policy.update()
     info.update(inf)
 
-    return trajs, total_reward, succ, info, policy
+    return obs, total_reward, succ, info, policy
 
 
 def train(key, policy, env, itr):
